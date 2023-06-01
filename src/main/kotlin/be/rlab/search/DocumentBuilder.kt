@@ -1,22 +1,27 @@
-package be.rlab.search.model
+package be.rlab.search
 
 import be.rlab.nlp.model.Language
 import be.rlab.search.Hashes.generateId
+import be.rlab.search.model.Document
+import be.rlab.search.model.Field
+import be.rlab.search.model.FieldType
 import java.util.*
 
 /** Builder to create [Document]s.
  */
 class DocumentBuilder private constructor (
     private val namespace: String,
-    private val language: Language
+    private val language: Language,
+    private val version: String
 ){
     companion object {
         fun new(
             namespace: String,
             language: Language,
+            version: String,
             callback: DocumentBuilder.() -> Unit
         ): DocumentBuilder {
-            val builder = DocumentBuilder(namespace, language)
+            val builder = DocumentBuilder(namespace, language, version)
             callback(builder)
             return builder
         }
@@ -148,10 +153,11 @@ class DocumentBuilder private constructor (
     /** Builds the document.
      */
     fun build(): Document {
-        return Document(
+        return Document.new(
             id = generateId(id, language),
             namespace = namespace,
-            fields = fields.toList()
+            fields = fields.toList(),
+            version = version
         )
     }
 

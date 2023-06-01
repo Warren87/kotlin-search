@@ -11,7 +11,6 @@ to provide the following features:
 * Text normalization
 * Multi-language stemming and tokenization
 * Text classification
-* Sentiment analysis
 
 ## Dependency
 
@@ -21,11 +20,11 @@ This is available on Maven Central Repository. It can be added using the followi
 <dependency>
     <groupId>be.rlab</groupId>
     <artifactId>kotlin-search</artifactId>
-    <version>1.1.0</version>
+    <version>1.3.0</version>
 </dependency>
 ```
 
-This version supports Kotlin 1.6 and Lucene 9.
+This version supports Kotlin 1.7 and Lucene 9.
 
 The only two hard dependencies are SLF4j and commons-codec. We will not add more dependencies unless it's strictly
 necessary to avoid classpath errors.
@@ -42,8 +41,8 @@ not need to perform a range query to retrieve all documents for a language. This
 for documents in different languages simultaneously.
 
 Before continue reading the following sections, we strongly recommend reading
-[Search and Scoring](https://lucene.apache.org/core/9_9_0/core/org/apache/lucene/search/package-summary.html#package.description)
-and [Classic Scoring Formula](https://lucene.apache.org/core/9_0_0/core/org/apache/lucene/search/similarities/TFIDFSimilarity.html)
+[Search and Scoring](https://lucene.apache.org/core/7_1_0/core/org/apache/lucene/search/package-summary.html#package.description)
+and [Classic Scoring Formula](https://lucene.apache.org/core/7_1_0/core/org/apache/lucene/search/similarities/TFIDFSimilarity.html)
 in Lucene documentation. This library uses the default scoring algorithm to match documents.
 
 ### Documents
@@ -68,7 +67,13 @@ that querying the index is analog to query a collection in a no-sql database.
 
 ### Indexing documents
 
-_kotlin-search_ provides a simple DSL to index documents. Let's start with the following example:
+_kotlin-search_ provides two strategies to index documents, a functional DSL and an object mapper. In order to keep
+backward-compatibility with older versions, the functional DSL and object mapper strategies cannot be mixed. If
+you indexed documents using the functional DSL, you cannot use the object mapper for searching.
+
+There is a plan to support older indexes in the future, but it will require some extra configuration.
+
+**Functional DSL**
 
 ```kotlin
 import be.rlab.nlp.model.Language
@@ -77,6 +82,7 @@ import be.rlab.search.IndexManager
 val indexManager = IndexManager("/tmp/lucene-index")
 
 indexManager.index("players", Language.SPANISH) {
+    string("id", "player-id-1234")
     text("firstName", "Juan")
     text("lastName", "Pérez")
     int("age", 27) {
@@ -86,7 +92,47 @@ indexManager.index("players", Language.SPANISH) {
 }
 ```
 
-It creates a new document within the _players_ namespace in the _spanish_ index. Lucene stores and indexes
+**Object Mapper**
+
+The object mapper strategy allows to use a data class to define a document structure.
+
+By default, all fields are stored, but you can override this behavior using the `@Stored` annotation.
+If marked as not stored, the field must be nullable.
+
+Fields are indexed according the field type. Look at the table below to check the default value for each type.
+Except `String` that is mapped to `Text`, all other primitive types are mapped to the underlying Lucene type.
+You can override the default type using the `@IndexFieldType` annotation.
+
+Note that the object mapper is strictly designed to map Lucene documents. You should not try to annotate your
+domain entities since it probably won't work as expected. The Kotlin field types are restricted to the supported
+Lucene field types, using other types will cause an error.
+
+```kotlin
+import be.rlab.nlp.model.Language
+import be.rlab.search.*
+import be.rlab.search.annotation.*
+
+@IndexDocument(namespace = "players", languages = [Language.SPANISH])
+data class Player(
+    @IndexField @IndexFieldType(FieldType.STRING) val id: String,
+    @IndexField val firstName: String,
+    @IndexField val lastName: String,
+    @IndexField @Indexed val age: Int,
+    @IndexField @Stored(false) val score: Float?
+)
+
+val indexManager = IndexManager("/tmp/lucene-index")
+val mapper = IndexMapper(indexManager)
+
+mapper.index(Player(
+    firstName = "Juan",
+    lastName = "Pérez",
+    age = 27,
+    score = 10.0F
+))
+```
+
+Both examples create a new document within the _players_ namespace in the _spanish_ index. Lucene stores and indexes
 fields depending on the field type. The following table describes the supported field types and how fields
 are indexed and stored by default.
 
@@ -100,8 +146,8 @@ are indexed and stored by default.
 | double     |   no   |   no    | A multi-dimensional Double value for fast range filters.
 
 By default, numeric fields are not stored. In order to force the storing or indexing of a field you can apply
-the ```store()``` and ```index()``` modifiers as shown above. If a field is not stored, it will not be available
-in the _Document_ when it is retrieved from the index.
+the ```store()``` and ```index()``` modifiers, or the `@Stored` and `@Indexed` annotations as shown above. If a field
+is not stored, it will not be available in the _Document_ when it is retrieved from the index.
 
 Lucene does not support to store multi-dimensional fields, since they're packed as a
 [BytesRef](https://lucene.apache.org/core/7_2_1/core/org/apache/lucene/util/BytesRef.html) value. This library
@@ -111,27 +157,70 @@ Column-wise fields for sorting/faceting are not supported yet.
 
 ### Searching
 
-_kotlin-search_ provides a DSL to build Lucene queries.
+_kotlin-search_ provides a functional DSL and an object mapper to build Lucene queries. All queries (look at the table
+below) provide the following types of search:
+
+* By a single field using the field name
+* By a single field using a class annotated property
+* By all fields in the document
+
+To search by all fields in the document, all queries support a signature without the field name. You can
+search by all fields or use the `by` modifier to restrict the search to a list of fields (look at the example below).
+
+**Functional DSL**
+
+In order to search by all fields using the functional DSL, you need to define a schema for the index namespace. The
+schema must be defined only once. Defining the schema is optional, if you don't plan to search by multiple fields, you
+can ignore the schema definition.
 
 ```kotlin
-val indexManager = IndexManager("/tmp/lucene-index")
+import be.rlab.search.query.*
+
+val indexManager = IndexManager("/tmp/lucene-index").apply {
+    addSchema("players") {
+        string("id")
+        text("firstName")
+        text("lasName")
+        int("age")
+        float("score")
+    }    
+}
 
 indexManager.search("players", Language.SPANISH) {
-    term("firstName", "Juan")
+    // Search in all fields defined in the schema.
+    term("Juan") {
+        // Optionally you can specify the list of fields, 
+        // if not specified it will search in all fields.
+        by("firstName")
+    }
     range("age", 20, 30)
 }
 ```
 
-The DSL supports the following type of queries:
+**Object Mapper**
 
-| Query type |   Field types    |  Default boolean clause
-|------------|------------------|-------------------------
-|   term     |    all           |  MUST
-|   range    |    numeric       |  SHOULD
-|  wildcard  |   string, text   |  MUST
-|   regex    |   string, text   |  MUST
-|   fuzzy    |   string, text   |  MUST
-|   phrase   |   string, text   |  MUST
+```kotlin
+import be.rlab.search.query.*
+
+val indexManager = IndexManager("/tmp/lucene-index")
+val mapper = IndexMapper(indexManager)
+
+mapper.search<Player>(Language.SPANISH) {
+    term(Player::firstName, "Juan")
+    range(Player::age, 20, 30)
+}
+```
+
+Both the functional DSL and the object mapper supports the following type of queries:
+
+| Query type | Field types  |  Default boolean clause
+|------------|--------------|-------------------------
+|   term     | all          |  MUST
+|   range    | numeric      |  SHOULD
+|  wildcard  | string, text |  MUST
+|   regex    | string, text |  MUST
+|   fuzzy    | string, text |  MUST
+|   phrase   | string, text |  MUST
 
 If you need to build a custom query, the ```QueryBuilder``` providers the ```custom()``` method that receives
 the current ```BooleanQuery``` in construction.
@@ -155,13 +244,14 @@ The ```QueryBuilder``` also supports parsing Lucene queries using the
 [QueryParser](https://lucene.apache.org/core/8_0_0/queryparser/org/apache/lucene/queryparser/classic/QueryParser.html)
 syntax.
 
-```
+```kotlin
 val indexManager = IndexManager("/tmp/lucene-index")
 
 indexManager.search("players", Language.SPANISH) {
     parse("firstName", "age:[22 TO 35] AND Juan")
 }
 ```
+
 The first parameter of the ```parse()``` method is the default field if no field is specified in the query. For
 instance, in the previous query, it will search for all persons with first name ```Juan``` with ages between
 22 and 35 years. For full syntax documentation take a look at the [Lucene documentation](https://lucene.apache.org/core/8_0_0/queryparser/org/apache/lucene/queryparser/classic/package-summary.html#package.description).
